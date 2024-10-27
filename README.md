@@ -26,7 +26,7 @@ Make sure you have the following installed:
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/Raghxv11/CalHacks.git
+   git clone https://github.com/Sanyam-jain30/gradify.git
    cd Gradify
    ```
 
