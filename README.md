@@ -1,5 +1,7 @@
 <h1 align="center">GRADIFY</h1>
 
+![WhatsApp Image 2024-10-27 at 11 58 59](https://github.com/user-attachments/assets/948d4597-1ffb-4f97-924d-63cbc4d49bb5)
+
 
 ## About Us
 Gradify is an AI integrated Grading tool that allows professors and educators to grade assignments using AI. With our bulk upload functionality and Plagiarism detection, along with our advanced PDF and Image detection software, our application makes the grading process smooth, so that our educators can focus on making a personal connection with students and bring in a new educational evolution.
