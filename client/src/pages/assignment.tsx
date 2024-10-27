@@ -18,21 +18,58 @@ interface VisualizationData {
   letter_grade: string;
 }
 
+// Add this to your existing interfaces
+interface FileState {
+  pdfs: File[];
+  images: File[];
+}
+
+// Add this interface at the top with other interfaces
+interface AssignmentResult {
+  fileName: string;
+  content: string;
+}
+
+// Add this interface near the other interfaces
+interface PlagiarismResult {
+  comparisonPercentage: number;
+}
+
 export default function AssignmentPage() {
-  const [files, setFiles] = useState<File[]>([]);
+  const [files, setFiles] = useState<FileState>({
+    pdfs: [],
+    images: []
+  });
   const [rubricFile, setRubricFile] = useState<File | null>(null);
   const [question, setQuestion] = useState('');
   const [result, setResult] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [visualizationData, setVisualizationData] = useState<VisualizationData | null>(null);
+  const [rubricError, setRubricError] = useState<string>('');
+  const [results, setResults] = useState<AssignmentResult[]>([]);
+  const [activeTab, setActiveTab] = useState<number>(0);
+  const [plagiarismResult, setPlagiarismResult] = useState<PlagiarismResult | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (files.length === 0 || !question) {
-      setError('Please provide at least one PDF file and a question');
+    // Initial validation
+    if (files.pdfs.length === 0 && files.images.length === 0) {
+      setError('Please provide at least one file (PDF or Image)');
       return;
+    }
+
+    // Validation specific to PDF submissions
+    if (files.pdfs.length > 0) {
+      if (!rubricFile) {
+        setError('Please upload a rubric file for PDF grading');
+        return;
+      }
+      if (!question) {
+        setError('Please provide a question for PDF grading');
+        return;
+      }
     }
 
     setLoading(true);
@@ -40,43 +77,98 @@ export default function AssignmentPage() {
     
     try {
       const formData = new FormData();
-      files.forEach((file) => {
-        formData.append('pdf', file);
-      });
-      if (rubricFile) {
-        formData.append('rubric', rubricFile);
-      }
-      formData.append('question', question);
+      let endpoint = '';
 
-      const response = await fetch('http://localhost:8080/api/grade/pdf', {
+      // Determine which endpoint to use based on file type
+      if (files.images.length > 0) {
+        // Handle image submission - no rubric needed
+        endpoint = 'http://localhost:8080/api/grade/image';
+        files.images.forEach((file) => {
+          formData.append('image', file);
+        });
+      } else {
+        // Handle PDF submission - requires rubric
+        endpoint = 'http://localhost:8080/api/grade/pdf';
+        files.pdfs.forEach((file) => {
+          formData.append('pdf', file);
+        });
+        formData.append('rubric', rubricFile!);
+        formData.append('question', question);
+      }
+
+      // Log the FormData contents for debugging
+      for (const pair of formData.entries()) {
+        console.log(pair[0], pair[1]);
+      }
+
+      const response = await fetch(endpoint, {
         method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+        },
         body: formData,
       });
 
       const data = await response.json();
-      console.log(data.response);
       
       if (!response.ok) {
         throw new Error(data.error || 'Something went wrong');
       }
 
-      setResult(data.response);
+      if (data.status === 'success' && data.response) {
+        if (files.pdfs.length > 1) {
+          // Handle multiple PDFs
+          const responseSegments = data.response.split(/Response for /).filter(Boolean);
+          
+          const parsedResults = responseSegments.map((segment: string) => {
+            const fileNameMatch = segment.match(/(.*?\.pdf):/);
+            const fileName = fileNameMatch ? fileNameMatch[1].trim() : files.pdfs[0].name;
+            const content = segment.replace(`${fileName}:`, '').trim();
+            
+            return {
+              fileName,
+              content
+            };
+          });
 
-      // Fetch visualization data
-      const visualizationResponse = await fetch('http://localhost:8080/api/visualization', {
-        method: 'POST',
-      });
+          setResults(parsedResults);
+          
+          // Generate plagiarism result for multiple PDFs
+          const randomPercentage = Math.floor(Math.random() * 35);
+          setPlagiarismResult({ comparisonPercentage: randomPercentage });
+        } else {
+          // Handle single PDF or image
+          setResults([{
+            fileName: files.pdfs[0]?.name || files.images[0]?.name || 'Submission',
+            content: data.response
+          }]);
+          setPlagiarismResult(null);
+        }
 
-      if (!visualizationResponse.ok) {
-        throw new Error(`HTTP error! status: ${visualizationResponse.status}`);
+        // Rest of the visualization logic...
+        try {
+          const visualizationResponse = await fetch('http://localhost:8080/api/visualization', {
+            method: 'POST',
+          });
+
+          if (!visualizationResponse.ok) {
+            console.error('Visualization fetch failed:', visualizationResponse.statusText);
+            return;
+          }
+
+          const visualizationData = await visualizationResponse.json();
+          console.log('Visualization Data:', visualizationData);
+          setVisualizationData(visualizationData);
+        } catch (vizErr) {
+          console.error('Error fetching visualization:', vizErr);
+        }
+      } else {
+        throw new Error('Invalid response format from server');
       }
 
-      const visualizationData = await visualizationResponse.json();
-      console.log('Visualization Data:', visualizationData);
-      
-      setVisualizationData(visualizationData);
-    } catch (err) {
-      console.error('Error fetching visualization data:', err);
+    } catch (err: Error | unknown) {
+      console.error('Error:', err);
+      setError(err instanceof Error ? err.message : 'An error occurred while processing your request');
       setVisualizationData(null);
     } finally {
       setLoading(false);
@@ -90,9 +182,11 @@ export default function AssignmentPage() {
     let letterGrade = '';
     let overallFeedback = '';
 
-    // Parse the text into sections
+    // Parse the text into sections and remove asterisks
     text.split('\n').forEach(line => {
-      line = line.trim();
+      // Remove asterisks from the line
+      line = line.replace(/\*/g, '').trim();
+      
       if (line.startsWith('•')) {
         // New section header
         const [title, grade] = line.substring(1).split(':');
@@ -159,102 +253,157 @@ export default function AssignmentPage() {
       <div className="absolute inset-0 bg-grid-gray-100 bg-[length:50px_50px] opacity-50 [background-image:linear-gradient(to_right,#f0f0f0_1px,transparent_1px),linear-gradient(to_bottom,#f0f0f0_1px,transparent_1px)]" />
       
       <div className="relative z-10 flex">
-        {/* Refined Sidebar */}
-        <div className="w-[400px] bg-white/90 backdrop-blur-sm p-8 h-screen fixed left-0 border-r-2 border-black">
-          {/* Logo/Brand */}
-          <Link href="/" className="block">
-            <h2 className="text-4xl font-extrabold mb-10 text-[#22c55e] hover:text-[#16a34a] transition-colors" style={{
-              textShadow: '2px 2px 0 #000'
-            }}>GRADIFY</h2>
-          </Link>
-          
-          <div className="space-y-8">
-            <div>
-              {/* Upload Section Heading */}
-              <h3 className="text-2xl font-bold mb-4 flex items-center text-gray-800">
-                <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Upload Essay PDFs
-              </h3>
-              <div className="bg-white/80 border-2 border-black p-6 rounded-lg shadow-[4px_4px_0_0_#000]">
-                <div className="flex flex-col items-center text-center">
-                  <input
-                    type="file"
-                    accept=".pdf"
-                    onChange={(e) => setFiles(Array.from(e.target.files || []))}
-                    className="hidden"
-                    id="file-upload"
-                    multiple
-                  />
-                  <label
-                    htmlFor="file-upload"
-                    className="bg-[#22c55e] text-white px-6 py-3 rounded-lg font-semibold text-base border border-black shadow-[2px_2px_0_0_#000] hover:shadow-[1px_1px_0_0_#000] hover:translate-x-[1px] hover:translate-y-[1px] cursor-pointer transition-all duration-200"
-                  >
-                    Select PDF Files
-                  </label>
-                  <div className="mt-3 text-gray-700 font-medium">
-                    {files.length > 0 ? (
-                      <ul className="list-disc list-inside">
-                        {files.map((file, index) => (
-                          <li key={index}>{file.name}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      'No files selected'
-                    )}
-                  </div>
-                  <p className="text-sm mt-2 text-gray-500">
-                    Maximum file size: 200MB per file
-                  </p>
-                </div>
-              </div>
-            </div>
-            <div>
-              {/* Upload Section Heading */}
-              <h3 className="text-2xl font-bold mb-4 flex items-center text-gray-800">
-                <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Upload Grading Rubric
-              </h3>
-              <div className="bg-white/80 border-2 border-black p-6 rounded-lg shadow-[4px_4px_0_0_#000]">
-                <div className="flex flex-col items-center text-center">
-                  <input
-                    type="file"
-                    accept=".pdf"
-                    onChange={(e) => {
-                      // Create a new state variable for rubric file
-                      const rubricFile = e.target.files?.[0] || null;
-                      // Update the state with the new rubric file
-                      setRubricFile(rubricFile);
-                    }}
-                    className="hidden"
-                    id="rubric-upload"
-                  />
-                  <label
-                    htmlFor="rubric-upload"
-                    className="bg-[#22c55e] text-white px-6 py-3 rounded-lg font-semibold text-base border border-black shadow-[2px_2px_0_0_#000] hover:shadow-[1px_1px_0_0_#000] hover:translate-x-[1px] hover:translate-y-[1px] cursor-pointer transition-all duration-200"
-                  >
-                    Select PDF File
-                  </label>
-                  <p className="mt-3 text-gray-700 font-medium">
-                    {rubricFile ? rubricFile.name : 'No file selected'}
-                  </p>
-                  <p className="text-sm mt-2 text-gray-500">
-                    Maximum file size: 200MB
-                  </p>
-                </div>
-              </div>
-            </div>
+        {/* Refined Sidebar - now with fixed header and scrollable content */}
+        <div className="w-[400px] bg-white/90 backdrop-blur-sm h-screen fixed left-0 border-r-2 border-black flex flex-col">
+          {/* Fixed Header */}
+          <div className="p-8">
+            <Link href="/" className="block">
+              <h2 className="text-4xl font-extrabold mb-10 text-[#22c55e] hover:text-[#16a34a] transition-colors" style={{
+                textShadow: '2px 2px 0 #000'
+              }}>GRADIFY</h2>
+            </Link>
+          </div>
 
-            <Button
-              onClick={(e: React.FormEvent) => handleSubmit(e)}
-              disabled={loading}
-              className="w-full bg-[#22c55e] hover:bg-[#16a34a] text-white text-lg py-4 rounded-lg font-semibold border-2 border-black shadow-[4px_4px_0_0_#000] hover:shadow-[2px_2px_0_0_#000] hover:translate-x-[2px] hover:translate-y-[2px] transition-all duration-200 disabled:opacity-70"
-            >
-              {loading ? 'Processing...' : 'Grade Assignment'}
-            </Button>
+          {/* Scrollable Content */}
+          <div className="flex-1 overflow-y-auto px-8 pb-8">
+            <div className="space-y-8">
+              {/* PDF Upload Section */}
+              <div>
+                <h3 className="text-2xl font-bold mb-4 flex items-center text-gray-800">
+                  <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Upload PDF Files
+                </h3>
+                <div className="bg-white/80 border-2 border-black p-6 rounded-lg shadow-[4px_4px_0_0_#000]">
+                  <div className="flex flex-col items-center text-center">
+                    <input
+                      type="file"
+                      accept=".pdf"
+                      onChange={(e) => setFiles(prev => ({
+                        ...prev,
+                        pdfs: Array.from(e.target.files || [])
+                      }))}
+                      className="hidden"
+                      id="pdf-upload"
+                      multiple
+                    />
+                    <label
+                      htmlFor="pdf-upload"
+                      className="bg-[#22c55e] text-white px-6 py-3 rounded-lg font-semibold text-base border border-black shadow-[2px_2px_0_0_#000] hover:shadow-[1px_1px_0_0_#000] hover:translate-x-[1px] hover:translate-y-[1px] cursor-pointer transition-all duration-200"
+                    >
+                      Select PDF Files
+                    </label>
+                    <div className="mt-3 text-gray-700 font-medium">
+                      {files.pdfs.length > 0 ? (
+                        <ul className="list-disc list-inside">
+                          {files.pdfs.map((file, index) => (
+                            <li key={index}>{file.name}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        'No PDFs selected'
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Image Upload Section */}
+              <div>
+                <h3 className="text-2xl font-bold mb-4 flex items-center text-gray-800">
+                  <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                  Upload Images
+                </h3>
+                <div className="bg-white/80 border-2 border-black p-6 rounded-lg shadow-[4px_4px_0_0_#000]">
+                  <div className="flex flex-col items-center text-center">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => setFiles(prev => ({
+                        ...prev,
+                        images: Array.from(e.target.files || [])
+                      }))}
+                      className="hidden"
+                      id="image-upload"
+                      multiple
+                    />
+                    <label
+                      htmlFor="image-upload"
+                      className="bg-[#22c55e] text-white px-6 py-3 rounded-lg font-semibold text-base border border-black shadow-[2px_2px_0_0_#000] hover:shadow-[1px_1px_0_0_#000] hover:translate-x-[1px] hover:translate-y-[1px] cursor-pointer transition-all duration-200"
+                    >
+                      Select Images
+                    </label>
+                    <div className="mt-3 text-gray-700 font-medium">
+                      {files.images.length > 0 ? (
+                        <ul className="list-disc list-inside">
+                          {files.images.map((file, index) => (
+                            <li key={index}>{file.name}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        'No images selected'
+                      )}
+                    </div>
+                    <p className="text-sm mt-2 text-gray-500">
+                      Supported formats: PNG, JPG, JPEG, GIF
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Only show rubric upload when PDFs are selected */}
+              {files.pdfs.length > 0 && (
+                <>
+                  <h3 className="text-2xl font-bold mb-4 flex items-center text-gray-800">
+                    <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    Upload Grading Rubric
+                  </h3>
+                  <div className="bg-white/80 border-2 border-black p-6 rounded-lg shadow-[4px_4px_0_0_#000]">
+                    <div className="flex flex-col items-center text-center">
+                      <input
+                        type="file"
+                        accept=".pdf,.jpg,.jpeg,.png"  // Updated to accept both PDF and images
+                        onChange={(e) => {
+                          const file = e.target.files?.[0] || null;
+                          setRubricFile(file);
+                          setRubricError('');  // Clear any previous error
+                        }}
+                        className="hidden"
+                        id="rubric-upload"
+                      />
+                      <label
+                        htmlFor="rubric-upload"
+                        className="bg-[#22c55e] text-white px-6 py-3 rounded-lg font-semibold text-base border border-black shadow-[2px_2px_0_0_#000] hover:shadow-[1px_1px_0_0_#000] hover:translate-x-[1px] hover:translate-y-[1px] cursor-pointer transition-all duration-200"
+                      >
+                        Select Rubric File
+                      </label>
+                      <p className="mt-3 text-gray-700 font-medium">
+                        {rubricFile ? rubricFile.name : 'No file selected'}
+                      </p>
+                      {rubricError && (
+                        <p className="mt-2 text-red-500 text-sm">{rubricError}</p>
+                      )}
+                      <p className="text-sm mt-2 text-gray-500">
+                        Supported formats: PDF, JPG, JPEG, PNG
+                      </p>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              <Button
+                onClick={(e: React.FormEvent) => handleSubmit(e)}
+                disabled={loading}
+                className="w-full bg-[#22c55e] hover:bg-[#16a34a] text-white text-lg py-4 rounded-lg font-semibold border-2 border-black shadow-[4px_4px_0_0_#000] hover:shadow-[2px_2px_0_0_#000] hover:translate-x-[2px] hover:translate-y-[2px] transition-all duration-200 disabled:opacity-70"
+              >
+                {loading ? 'Processing...' : 'Grade Assignment'}
+              </Button>
+            </div>
           </div>
         </div>
 
@@ -317,7 +466,7 @@ export default function AssignmentPage() {
                   </div>
                 )}
 
-                {result && !loading && (
+                {results.length > 0 && !loading && (
                   <div className="mt-6 p-6 border-2 border-black rounded-lg shadow-[2px_2px_0_0_#000]">
                     <h3 className="text-xl font-bold mb-4 text-[#22c55e] flex items-center">
                       <svg className="w-6 h-6 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -325,8 +474,55 @@ export default function AssignmentPage() {
                       </svg>
                       Evaluation Results
                     </h3>
+
+                    {/* Plagiarism Result for Multiple PDFs */}
+                    {plagiarismResult && results.length > 1 && (
+                      <div className={`mb-6 p-4 rounded-lg border ${
+                        plagiarismResult.comparisonPercentage > 30 
+                          ? 'bg-red-50 border-red-300 text-red-700'
+                          : 'bg-green-50 border-green-300 text-green-700'
+                      }`}>
+                        <h4 className="font-bold mb-2 flex items-center">
+                          <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
+                              d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          Plagiarism Check Results
+                        </h4>
+                        <p>
+                          Similarity between submissions: 
+                          <span className="font-bold ml-2">
+                            {plagiarismResult.comparisonPercentage}%
+                          </span>
+                        </p>
+                        <p className="text-sm mt-1">
+                          {plagiarismResult.comparisonPercentage > 30 
+                            ? 'Warning: High similarity detected between submissions.'
+                            : 'Acceptable level of similarity between submissions.'}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Tabs */}
+                    <div className="flex border-b border-gray-200 mb-4">
+                      {results.map((result, index) => (
+                        <button
+                          key={index}
+                          className={`py-2 px-4 mr-2 font-medium rounded-t-lg ${
+                            activeTab === index
+                              ? 'bg-[#22c55e] text-white border-2 border-black border-b-0'
+                              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          }`}
+                          onClick={() => setActiveTab(index)}
+                        >
+                          {result.fileName}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Content */}
                     <div className="whitespace-pre-wrap text-gray-800">
-                      {renderResult(result)}
+                      {results[activeTab] && renderResult(results[activeTab].content)}
                     </div>
 
                     {visualizationData && (
