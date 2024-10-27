@@ -1,6 +1,4 @@
-# SODA Hacks Project - 29
 <h1 align="center">GRADIFY</h1>
-
 
 
 ## About Us
