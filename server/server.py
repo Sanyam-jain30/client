@@ -1,6 +1,4 @@
-import http
 import json
-import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
@@ -15,6 +13,7 @@ from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 from langchain.docstore.document import Document
 import tempfile
+from PIL import Image
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -23,14 +22,11 @@ CORS(app)
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY")
 genai.configure(api_key=API_KEY)
-#Load the Copyleaks API key
-copyleaks_api_key = os.getenv("COPYLEAKS_API_KEY")
 
 # Initialize variables
-content_check_result = {}
 visualization_data = []
-percentage_grade = []
-letter_grade = []
+percentage_grade = None
+letter_grade = None
 
 def convert_text_to_documents(text_chunks):
     return [Document(page_content=chunk) for chunk in text_chunks]
@@ -57,98 +53,6 @@ def get_vector_store(text_chunks):
     vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
     vector_store.save_local("faiss_index")
 
-#Implementing the Copyleaks API
-def create_scan_id(student_id):
-    # Generate a submission_id with a shortened UUID
-    uuid_part = str(uuid.uuid4()).replace('-', '')[:8]
-    submission_id = f"submission{uuid_part}"
-    
-    # Combine the components
-    scan_id = f"{student_id}-{submission_id}"
-    
-    # Ensure the scan_id meets the length requirement (3-36 characters)
-    if len(scan_id) > 36:
-        scan_id = scan_id[:36]
-    
-    return scan_id
-
-def check_content_origin(text):
-    conn = http.client.HTTPSConnection("api.copyleaks.com")
-
-    login_token = os.getenv("COPYLEAKS_LOGIN_TOKEN")
-    
-    headers = {
-        'Authorization': f"Bearer {login_token}",
-        'Content-Type': "application/json",
-        'Accept': "application/json"
-    }
-    
-    payload = json.dumps({
-        "text": text,
-        "language": "en",
-        "sandbox": False
-    })
-
-    try:
-        scan_id = create_scan_id("studentid123")
-        conn.request("POST", f"/v2/writer-detector/{scan_id}/check", body=payload, headers=headers)
-        res = conn.getresponse()
-        data = res.read().decode("utf-8")
-        
-        try:
-            result = json.loads(data)
-        except json.JSONDecodeError:
-            return f"Error: Invalid JSON response from API. Raw response: {data}"
-        
-        summary = result.get('summary', {})
-        ai_score = summary.get('ai', 0)
-        human_score = summary.get('human', 0)
-        probability = summary.get('probability', 0.0)
-        
-        total_words = result.get('scannedDocument', {}).get('totalWords', 0)
-        
-        if ai_score > human_score:
-            classification = "AI-generated content"
-        elif human_score > ai_score:
-            classification = "Human-generated content"
-        else:
-            classification = "Undetermined"
-
-        
-        return {
-            "classification": classification,
-            "ai_score": ai_score,
-            "human_score": human_score,
-            "total_words": total_words,
-            "model_version": result.get('modelVersion', 'Unknown'),
-        }
-    
-    except Exception as e:
-        return f"Error: {str(e)}"
-    finally:
-        conn.close()
-
-
-
-def get_gemini_response(image, prompt):
-    model = genai.GenerativeModel("gemini-1.5-flash")  # Updated model
-    response = model.generate_content([prompt, image[0]])
-    return response.text
-
-
-def input_image_setup(uploaded_file):
-    if uploaded_file is not None:
-        bytes_data = uploaded_file.getvalue()
-        image_parts = [
-            {
-                "mime_type": uploaded_file.type,
-                "data": bytes_data,
-            }
-        ]
-        return image_parts
-    else:
-        return None
-
 def get_rubric_chain():
     prompt_template = f"""
     Extract the given total points, criteria, and points/pts from the given rubric:\n {{context}}?\n
@@ -161,6 +65,11 @@ def get_rubric_chain():
     )
     chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
     return chain
+
+def get_gemini_response(image, prompt):
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = model.generate_content([prompt, image[0]])
+    return response.text
 
 def get_conversational_chain(rubric=None):
     if rubric:
@@ -222,13 +131,94 @@ def create_visualizations(output_text):
 
     for line in lines:
         if "Total Percentage Grade" in line:
-            percentage_grade.append(float(line.split(':')[1].strip().replace('%', '').replace('*', '').strip()))
+            percentage_grade = float(line.split(':')[1].strip().replace('%', '').replace('*', '').strip())
         elif "Letter Grade" in line:
-            letter_grade.append((':')[1].strip().replace('*', '').strip())
+            letter_grade = line.split(':')[1].strip().replace('*', '').strip()
+
+def input_image_setup(image_paths):
+    """
+    Prepare images for Gemini model input
+    """
+    image_parts = []
+    for path in image_paths:
+        image = Image.open(path)
+        # Convert to RGB if image is in RGBA format
+        if image.mode == 'RGBA':
+            image = image.convert('RGB')
+        image_parts.append(image)
+    return image_parts
 
 @app.route('/hello', methods=['GET'])
 def hello():
-    return jsonify({'message': 'Hello, World!'})
+    return jsonify({'message': 'gradify backend baby'})
+
+@app.route('/api/grade/image', methods=['POST', 'OPTIONS'])
+def grade_image():
+    try:
+        if 'image' not in request.files:
+            return jsonify({'error': 'No Image file uploaded'}), 400
+        
+        answer_files = request.files.getlist('image')
+        temp_images = []
+        image_names = []
+        
+        # Save answer images temporarily
+        for image in answer_files:
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_image:
+                image.save(temp_image.name)
+                temp_images.append(temp_image.name)
+                image_names.append(image.filename)
+                temp_image.close()
+            
+        input_prompt = """
+        You are an expert grader. Your task is to grade the student's solution shown in the image.
+        
+        Follow these steps:
+        1. First, carefully read and understand what the student has written/solved
+        2. Examine the solution in detail, looking at both the process and final answer
+        3. Grade based on mathematical accuracy, problem-solving approach, and clarity of work
+        4. Provide specific feedback on what was done well and what could be improved
+        
+        Use exactly this format:
+        
+        Student's Solution Analysis:
+        [Brief analysis of the student's work and approach]
+        
+        Grading:
+        • Mathematical Accuracy: score/20
+          [Brief explanation of score]
+        • Problem-Solving Approach: score/20
+          [Brief explanation of score]
+        • Work Clarity: score/10
+          [Brief explanation of score]
+        
+        Total Percentage Grade: [X]%
+        Letter Grade: [X]
+        
+        Feedback:
+        [2-3 sentences of constructive feedback]
+        """
+        
+        # Prepare images for Gemini
+        all_images = input_image_setup(temp_images)
+        
+        # Get response from Gemini
+        response = get_gemini_response(all_images, input_prompt)
+        
+        # Process response for visualization
+        create_visualizations(response)
+        extract_criteria_and_values(response)
+            
+        # Clean up temporary files
+        for temp in temp_images:
+            os.unlink(temp)
+        
+        return jsonify({
+            'status': 'success',
+            'response': response
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/grade/pdf', methods=['POST', 'OPTIONS'])
 def grade_pdf():
@@ -259,7 +249,6 @@ def grade_pdf():
             
         raw_text = get_pdf_text(temp_pdfs)
         responses = ""
-        i = 0
 
         for key, value in raw_text.items():
             text_chunks = get_text_chunks(value)
@@ -280,11 +269,10 @@ def grade_pdf():
             documents = convert_text_to_documents(text_chunks)
             
             response = chain({"input_documents": documents, "rubric": rubric_text, "question": question}, return_only_outputs=True)
-            responses += f"\nResponse for {pdf_names[i]}: \n\n" + response['output_text']
+            responses += f"\nResponse for {pdf_names[temp_pdfs.index(key)]}: \n\n" + response['output_text']
             
             create_visualizations(response["output_text"])
             extract_criteria_and_values(response["output_text"])
-            i += 1
         
         for temp in temp_pdfs:
             os.unlink(temp)
@@ -300,105 +288,9 @@ def grade_pdf():
 @app.route('/api/visualization', methods=['POST', 'OPTIONS'])
 def visualization_pdf():
     try:       
-        print(visualization_data)
         return json.dumps({"criteria": visualization_data, "percentage_grade": percentage_grade, "letter_grade": letter_grade})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/plagirism', methods=['POST', 'OPTIONS'])
-def plagirism_check():
-    global content_check_result
-    try:       
-        return json.dumps({"Classification": content_check_result['classification'], "AI Score": content_check_result['ai_score'], "Human Score": content_check_result['human_score']})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/grade/image', methods=['POST', 'OPTIONS'])
-def grade_image():
-    try:
-        if 'image' not in request.files:
-            return jsonify({'error': 'No Image file uploaded'}), 400
-        
-        answer_files = request.files.getlist('image')
-        question_file = request.files.get('rubric')
-        
-        if not question_file:
-            return jsonify({'error': 'No question provided'}), 400
-
-        temp_images = []
-        pdf_names = []
-
-        for image in answer_files:
-            # Save the uploaded file temporarily
-            with tempfile.NamedTemporaryFile(delete=False) as temp_image:
-                image.save(temp_image.name)
-                temp_images.append(temp_image.name)
-                pdf_names.append(image.filename)
-                temp_image.close()
-        
-        # Save the uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False) as temp_question:
-            question_file.save(temp_question.name)
-            temp_question.close()
-            
-        input_prompt = """
-        Your task is to determine if the student's solution \
-        is correct or not.
-        To solve the problem do the following:
-        - First, work out your own solution to the problem. 
-        - Then compare your solution to the student's solution \ 
-        and evaluate if the student's solution is correct or not. 
-        Don't decide if the student's solution is correct until 
-        you have done the problem yourself.
-        Use the following format:
-        Question:
-
-        question here
-
-        \n
-        Student's solution:
-
-        student's solution here
-
-        \n
-        Actual solution:
-
-        steps to work out the solution and your solution here
-
-        \n
-        Is the student's solution the same as actual solution \
-        just calculated:
-
-        yes or no
-
-        \n
-        Student grade:
-        ```
-        correct or incorrect
-        """
-        ## If submit button is clicked
-
-        solution_data = input_image_setup([temp_images]) if temp_images else None
-        full_prompt = input_prompt.format(
-            question_here="The question will be read from uploaded image.",
-            student_solution_here="The solution will be read from uploaded image.",
-            actual_solution_here="The actual solution will be calculated here."
-        )
-        response = get_gemini_response(solution_data, full_prompt)
-            
-        # Clean up temporary file
-        for temp in temp_images:
-            os.unlink(temp)
-        os.unlink(temp_question.name)
-        
-        return jsonify({
-            'status': 'success',
-            'response': response
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

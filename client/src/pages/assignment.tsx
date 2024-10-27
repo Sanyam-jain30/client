@@ -118,26 +118,32 @@ export default function AssignmentPage() {
       if (data.status === 'success' && data.response) {
         if (files.pdfs.length > 1) {
           // Handle multiple PDFs
-          const responseSegments = data.response.split(/Response for /).filter(Boolean);
-          
-          const parsedResults = responseSegments.map((segment: string) => {
-            const fileNameMatch = segment.match(/(.*?\.pdf):/);
-            const fileName = fileNameMatch ? fileNameMatch[1].trim() : files.pdfs[0].name;
-            const content = segment.replace(`${fileName}:`, '').trim();
-            
-            return {
-              fileName,
-              content
-            };
-          });
+          const responseSegments = data.response
+            .split(/Response for /)
+            .filter((segment: string) => segment.trim().length > 0)  // Remove empty segments
+            .map((segment: string) => {
+              const firstLine = segment.split('\n')[0];
+              const fileName = firstLine.replace(':', '').trim();
+              const content = segment.substring(firstLine.length + 1).trim();
+              
+              return {
+                fileName,
+                content
+              };
+            })
+            .filter((result: AssignmentResult) => files.pdfs.some(file => file.name === result.fileName)); // Only keep results that match uploaded files
 
-          setResults(parsedResults);
+          setResults(responseSegments);
           
           // Generate plagiarism result for multiple PDFs
           const randomPercentage = Math.floor(Math.random() * 35);
           setPlagiarismResult({ comparisonPercentage: randomPercentage });
         } else {
-          // Handle single PDF or image
+          // Keep original single file handling
+          setResult(data.response);
+          console.log('Result:', data.response);
+          
+          // Set results for the UI
           setResults([{
             fileName: files.pdfs[0]?.name || files.images[0]?.name || 'Submission',
             content: data.response
